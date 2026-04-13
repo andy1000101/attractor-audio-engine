@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Attractor Sonifier: V4.1 Fixed</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <style>
+        body { margin: 0; background: #020202; color: #00ffcc; font-family: 'Courier New', monospace; overflow: hidden; }
+        #ui { position: absolute; top: 20px; left: 20px; z-index: 10; background: rgba(0, 15, 15, 0.95); padding: 25px; border: 1px solid #00ffcc; width: 320px; box-shadow: 0 0 20px rgba(0,255,204,0.3); }
+        h2 { margin: 0 0 15px 0; font-size: 13px; letter-spacing: 3px; border-bottom: 1px solid #004444; padding-bottom: 10px; color: #00ffcc; }
+        .control-group { margin-bottom: 12px; }
+        label { display: block; font-size: 9px; opacity: 0.5; margin-bottom: 4px; text-transform: uppercase; }
+        select { width: 100%; background: #001a1a; color: #00ffcc; border: 1px solid #00ffcc; padding: 6px; font-family: monospace; cursor: pointer; font-size: 11px; }
+        .file-input-wrapper { position: relative; border: 1px dashed #00ffcc; padding: 10px; text-align: center; font-size: 10px; margin-bottom: 15px; cursor: pointer; }
+        input[type=file] { position: absolute; left: 0; top: 0; opacity: 0; width: 100%; height: 100%; cursor: pointer; }
+        .btn-group { display: flex; gap: 4px; margin-bottom: 10px; }
+        .btn-sub { flex: 1; background: transparent; border: 1px solid #00ffcc; color: #00ffcc; padding: 6px; font-size: 9px; cursor: pointer; text-transform: uppercase; }
+        .btn-sub.active { background: #00ffcc; color: #000; font-weight: bold; }
+        .btn-main { width: 100%; background: #00ffcc; border: none; padding: 12px; font-weight: bold; cursor: pointer; margin-bottom: 10px; color: #000; letter-spacing: 1px; }
+        .btn-main:disabled { background: #003333; color: #006666; }
+        input[type=range] { width: 100%; appearance: none; background: #002222; height: 2px; outline: none; margin: 8px 0; }
+        input[type=range]::-webkit-slider-thumb { appearance: none; width: 10px; height: 10px; background: #00ffcc; border-radius: 50%; cursor: pointer; }
+        #progress-bar { width: 0%; height: 2px; background: #fff; margin-top: 15px; box-shadow: 0 0 10px #00ffcc; }
+        .stats-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; padding-top: 15px; border-top: 1px solid #004444; }
+        .stat-box { font-size: 10px; }
+        .stat-val { color: #fff; font-size: 12px; display: block; margin-top: 2px; }
+    </style>
+</head>
+<body>
+
+<div id="ui">
+    <h2>SHAPE_SONIFIER_V4</h2>
+    
+    <div class="file-input-wrapper">
+        <span id="fileNameDisplay">INPUT_DATASET.JSON</span>
+        <input type="file" id="fileInput" accept=".json">
+    </div>
+
+    <div class="control-group">
+        <label>Engine_Logic</label>
+        <div class="btn-group">
+            <button class="btn-sub active" id="tonnetzBtn">TONNETZ</button>
+            <button class="btn-sub" id="radialBtn">RADIAL</button>
+        </div>
+    </div>
+
+    <div class="control-group">
+        <label>Quantization_Method</label>
+        <select id="scaleSelect">
+            <option value="pentatonic">MINOR PENTATONIC (Ambient)</option>
+            <option value="phrygian">PHRYGIAN (Tense/Dark)</option>
+            <option value="lydian">LYDIAN (Spacey/Bright)</option>
+            <option value="chromatic">OFF (RAW CHROMATIC)</option>
+        </select>
+    </div>
+    
+    <button id="playBtn" class="btn-main" disabled>INITIATE_SEQUENCE</button>
+    
+    <div class="btn-group">
+        <button id="stepBtn" class="btn-sub" disabled>MANUAL_STEP</button>
+        <button id="stopBtn" class="btn-sub" disabled>PAUSE</button>
+        <button id="resetBtn" class="btn-sub">RESTART</button>
+    </div>
+
+    <div class="control-group">
+        <div style="display:flex; justify-content:space-between; font-size:9px;"><span>STRIDE_STEP</span><span id="strideVal">5</span></div>
+        <input type="range" id="strideSlider" min="1" max="100" value="5">
+    </div>
+
+    <div class="control-group">
+        <div style="display:flex; justify-content:space-between; font-size:9px;"><span>LATENCY_INTERVAL</span><span id="latencyVal">60ms</span></div>
+        <input type="range" id="latencySlider" min="20" max="500" value="60">
+    </div>
+
+    <div id="progress-bar"></div>
+    
+    <div class="stats-grid">
+        <div class="stat-box"><span style="opacity:0.5">POSITION</span><span id="idxDisplay" class="stat-val">0 / 0</span></div>
+        <div class="stat-box"><span style="opacity:0.5">FREQ_OUT</span><span id="noteDisplay" class="stat-val">--</span></div>
+    </div>
+</div>
+
+<script>
+    let scene, camera, renderer, cloud, vertices = [], currentIndex = 0, isPlaying = false, playbackTimer = null;
+    let currentStride = 5, currentLatency = 60, currentMode = 'tonnetz', dataRadius = 1;
+
+    const SCALES = {
+        pentatonic: [0, 3, 5, 7, 10],
+        phrygian: [0, 1, 3, 5, 7, 8, 10],
+        lydian: [0, 2, 4, 6, 7, 9, 11],
+        chromatic: null
+    };
+
+    const synth = new Tone.PolySynth(Tone.Synth, { 
+        oscillator: { type: "triangle" }, 
+        envelope: { attack: 0.01, decay: 0.1, sustain: 0.2, release: 0.6 } 
+    }).toDestination();
+    const reverb = new Tone.Reverb(2.5).toDestination();
+    synth.connect(reverb);
+
+    function initThree() {
+        scene = new THREE.Scene();
+        camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 2000);
+        camera.position.z = 50;
+        renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+        animate();
+    }
+
+    function animate() {
+        requestAnimationFrame(animate);
+        if (cloud) cloud.rotation.y += 0.0006;
+        renderer.render(scene, camera);
+    }
+
+    document.getElementById('fileInput').onchange = (e) => {
+        const file = e.target.files[0];
+        if(!file) return;
+        document.getElementById('fileNameDisplay').innerText = file.name.toUpperCase();
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            vertices = JSON.parse(ev.target.result);
+            setupCloud();
+            document.getElementById('playBtn').disabled = false;
+            document.getElementById('stepBtn').disabled = false;
+            resetPlayback();
+        };
+        reader.readAsText(file);
+    };
+
+    function setupCloud() {
+        if (cloud) scene.remove(cloud);
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(vertices.flatMap(v => [v.x, v.y, v.z])), 3));
+        const colors = new Float32Array(vertices.length * 3);
+        for(let i=0; i<colors.length; i+=3) { colors[i]=0; colors[i+1]=0.4; colors[i+2]=0.3; }
+        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geo.center(); geo.computeBoundingSphere();
+        dataRadius = geo.boundingSphere.radius || 1;
+        cloud = new THREE.Points(geo, new THREE.PointsMaterial({ size: 0.22, vertexColors: true, transparent: true, opacity: 0.7 }));
+        cloud.scale.set(30/dataRadius, 30/dataRadius, 30/dataRadius);
+        scene.add(cloud);
+        document.getElementById('idxDisplay').innerText = `0 / ${vertices.length}`;
+    }
+
+    function processNote() {
+        if (currentIndex >= vertices.length) { stopPlayback(); return; }
+        const v = vertices[currentIndex];
+        let midiRaw;
+
+        const r = Math.sqrt(v.x**2 + v.y**2 + v.z**2);
+        if (currentMode === 'tonnetz') {
+            const sens = 8 / dataRadius;
+            midiRaw = 52 + (Math.round(v.x * sens) * 7) + (Math.round(v.y * sens) * 4) + (Math.round(v.z * sens) * 3);
+        } else {
+            midiRaw = 40 + ((r / dataRadius) * 48);
+        }
+
+        let midi = Math.max(36, Math.min(100, Math.round(midiRaw)));
+        const activeScale = SCALES[document.getElementById('scaleSelect').value];
+        if (activeScale) {
+            const octave = Math.floor(midi / 12);
+            const note = midi % 12;
+            const closest = activeScale.reduce((prev, curr) => Math.abs(curr - note) < Math.abs(prev - note) ? curr : prev);
+            midi = (octave * 12) + closest;
+        }
+
+        const colorAttr = cloud.geometry.attributes.color;
+        for (let i = -10; i < 35; i++) {
+            let pIdx = currentIndex - i;
+            if (pIdx >= 0 && pIdx < vertices.length) {
+                let intensity = (i >= 0 && i < 25) ? (1 - i/25) : 0;
+                if (intensity > 0) colorAttr.setXYZ(pIdx, intensity, 1, 0.8);
+                else colorAttr.setXYZ(pIdx, 0, 0.4, 0.3);
+            }
+        }
+        colorAttr.needsUpdate = true;
+
+        const freq = Tone.Frequency(midi, "midi");
+        document.getElementById('noteDisplay').innerText = freq.toNote();
+        document.getElementById('idxDisplay').innerText = `${currentIndex} / ${vertices.length}`;
+        document.getElementById('progress-bar').style.width = (currentIndex/vertices.length)*100 + "%";
+        
+        synth.triggerAttackRelease(freq, "32n");
+    }
+
+    function autoPlay() {
+        processNote();
+        currentIndex += currentStride;
+        playbackTimer = setTimeout(autoPlay, currentLatency);
+    }
+
+    function stopPlayback() { 
+        isPlaying = false; 
+        document.getElementById('playBtn').disabled = false; 
+        document.getElementById('stopBtn').disabled = true; 
+        clearTimeout(playbackTimer); 
+    }
+
+    function resetPlayback() { 
+        stopPlayback(); 
+        currentIndex = 0; 
+        document.getElementById('progress-bar').style.width = "0%"; 
+        if (cloud) {
+            const c = cloud.geometry.attributes.color;
+            for(let i=0; i<vertices.length; i++) c.setXYZ(i, 0, 0.4, 0.3);
+            c.needsUpdate = true;
+        }
+    }
+
+    document.getElementById('playBtn').onclick = async () => { 
+        await Tone.start(); isPlaying = true; 
+        document.getElementById('playBtn').disabled = true; 
+        document.getElementById('stopBtn').disabled = false; 
+        autoPlay(); 
+    };
+
+    document.getElementById('stepBtn').onclick = async () => { 
+        await Tone.start(); 
+        if(isPlaying) stopPlayback();
+        processNote(); 
+        currentIndex += currentStride; 
+    };
+
+    document.getElementById('stopBtn').onclick = stopPlayback;
+    document.getElementById('resetBtn').onclick = resetPlayback;
+    
+    document.getElementById('strideSlider').oninput = (e) => { 
+        currentStride = parseInt(e.target.value); 
+        document.getElementById('strideVal').innerText = currentStride; 
+    };
+    
+    document.getElementById('latencySlider').oninput = (e) => { 
+        currentLatency = parseInt(e.target.value); 
+        document.getElementById('latencyVal').innerText = currentLatency + "ms"; 
+    };
+
+    document.getElementById('tonnetzBtn').onclick = () => { currentMode = 'tonnetz'; document.getElementById('tonnetzBtn').classList.add('active'); document.getElementById('radialBtn').classList.remove('active'); };
+    document.getElementById('radialBtn').onclick = () => { currentMode = 'radial'; document.getElementById('radialBtn').classList.add('active'); document.getElementById('tonnetzBtn').classList.remove('active'); };
+
+    initThree();
+</script>
+</body>
+</html>
